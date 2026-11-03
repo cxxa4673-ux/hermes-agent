@@ -1,0 +1,90 @@
+name: Deploy to Hugging Face Space
+
+# Pushes the contents of hf-space/ to the Hugging Face Space
+# https://huggingface.co/spaces/cxxa4673/hermes-agent
+#
+# Why the folder: the Space is a Gradio Space, so it must contain app.py +
+# requirements.txt + a README.md with the Space metadata front-matter. It must
+# NOT receive this whole repository (274 MB / 22k files would fail to upload
+# and the Space would never boot).
+#
+# Required repo secret: HF_TOKEN
+#   huggingface.co -> Settings -> Access Tokens -> "Write" token
+#   then: gh secret set HF_TOKEN --repo cxxa4673-ux/hermes-agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hf-space/**"
+      - ".github/workflows/sync-to-hf.yml"
+  workflow_dispatch:
+
+# Never run two deploys against the same Space at the same time.
+concurrency:
+  group: deploy-hf-space
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Sync hf-space/ to the Space
+    # NOTE: deliberately github-hosted. The upstream workflows in this repo
+    # request `blacksmith-*` runners, which do not exist on this account, so
+    # their jobs sit in "Waiting for a runner" forever. This job must never
+    # do that.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify HF_TOKEN secret exists
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "${HF_TOKEN}" ]; then
+            echo "::error::Repository secret HF_TOKEN is not set. Create a WRITE token at https://huggingface.co/settings/tokens and run: gh secret set HF_TOKEN --repo ${{ github.repository }}"
+            exit 1
+          fi
+
+      - name: Verify the Space payload looks right
+        run: |
+          set -euo pipefail
+          for f in app.py requirements.txt README.md; do
+            test -f "hf-space/$f" || { echo "::error::hf-space/$f is missing"; exit 1; }
+          done
+          grep -q '^sdk:' hf-space/README.md || { echo "::error::hf-space/README.md needs Hugging Face front-matter (sdk: gradio)"; exit 1; }
+          echo "payload OK: $(find hf-space -type f | wc -l) file(s)"
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: cxxa4673
+          SPACE_ID: cxxa4673/hermes-agent
+        run: |
+          set -euo pipefail
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global credential.helper ""
+          if ! git clone --depth 1 "https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${SPACE_ID}" space; then
+            echo "::error::Could not clone https://huggingface.co/spaces/${SPACE_ID}. Create the Space first (SDK: Gradio), and make sure HF_TOKEN is a WRITE token for that account."
+            exit 1
+          fi
+
+          # Keep the Space's .git, wipe everything else, drop our payload in.
+          find space -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -a hf-space/. space/
+
+          cd space
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Space already up to date - nothing to push."
+            exit 0
+          fi
+          git commit -m "Deploy ${GITHUB_SHA:0:7} from ${GITHUB_REPOSITORY}"
+          git push
+          echo "### Deployed :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://huggingface.co/spaces/${SPACE_ID}" >> "$GITHUB_STEP_SUMMARY"
