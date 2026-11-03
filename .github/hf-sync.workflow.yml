@@ -1,0 +1,50 @@
+name: Sync to Hugging Face
+
+# This mirror is independent of the upstream CI concurrency group and runners.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-to-hugging-face
+  cancel-in-progress: false
+
+jobs:
+  sync-to-hub:
+    # A manual dispatch from a feature branch must not overwrite the Space's main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the full Git history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          lfs: true
+          persist-credentials: false
+
+      - name: Check the Hugging Face token
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [[ -z "${HF_TOKEN:-}" ]]; then
+            echo "::error::Add HF_TOKEN in GitHub repository Settings > Secrets and variables > Actions. Use a Hugging Face token with write access to the Space."
+            exit 1
+          fi
+
+      - name: Push main to the Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Send credentials through Git's environment-scoped config, not the
+          # remote URL or a credential file. Git errors cannot expose the token.
+          auth="$(printf '%s:%s' 'cxxa4673' "$HF_TOKEN" | base64 --wrap=0)"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='http.https://huggingface.co/.extraheader'
+          export GIT_CONFIG_VALUE_0="Authorization: Basic ${auth}"
+          git push https://huggingface.co/spaces/cxxa4673/hermes-agent HEAD:refs/heads/main
