@@ -1,0 +1,2 @@
+# gradio is pre-installed by the Space SDK (see sdk_version in README.md).
+# Only add extra dependencies here; keep this list small so the Space builds fast.
