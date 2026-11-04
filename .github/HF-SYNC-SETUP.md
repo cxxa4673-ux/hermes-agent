@@ -1,52 +1,54 @@
-# Enable the Hugging Face sync
+# Hugging Face sync
 
-The connected GitHub integration cannot write files under `.github/workflows/`.
-The validated workflow is therefore staged at `.github/hf-sync.workflow.yml`.
-GitHub does **not** run it from that location. The repository owner must install
-it once using their own GitHub account.
+The active workflow is `.github/workflows/sync-to-hugging-face.yml`. It mirrors
+this repository's files to the private Space `cxxa4673/hermes-agent`.
 
-## Install after merging the workflow-fix PR
+## How the mirror works
 
-1. Open [the workflow template](hf-sync.workflow.yml) and copy its contents.
-2. In the GitHub repository, select the `main` branch, then **Add file → Create
-   new file**.
-3. Name the file `.github/workflows/sync-to-hugging-face.yml` and paste the contents.
-4. Commit the new file to `main`.
+- Pushes to GitHub `main` trigger a sync. Manual uploads are also main-only.
+- The workflow clones the Space's current `main`, replaces its files with the
+  GitHub snapshot, and commits on top of the Space's existing history.
+- Space-only files are removed. The repository owner explicitly approved this
+  mirror behavior.
+- The push is **not forced**. If someone updates the Space after the workflow
+  clones it, the push fails instead of overwriting that concurrent work.
+- GitHub is checked out with depth 1. The Space receives the current files, not
+  GitHub's unrelated commit history.
+- `HF_TOKEN` must remain a GitHub Actions repository secret with write access to
+  the Space. Never put its value in a source file, remote URL, or chat.
+- The workflow uses `ubuntu-latest` and its own concurrency group, so inherited
+  Blacksmith CI queues do not block it.
 
-Alternatively, from a local checkout with the merged fix:
+## Check status without uploading
+
+From **Actions → Sync to Hugging Face → Run workflow**, enable
+**Only report the private Space status; do not upload files**. This read-only
+check can also run from a feature branch and reports the Space SDK, runtime
+stage, and hardware in the job summary.
+
+Or use the GitHub CLI:
 
 ```sh
-git switch main
-git pull --ff-only origin main
-mkdir -p .github/workflows
-git mv .github/hf-sync.workflow.yml .github/workflows/sync-to-hugging-face.yml
-git commit -m "ci: enable Hugging Face sync"
-git push origin main
+gh workflow run sync-to-hugging-face.yml --ref main -f check_only=true
 ```
 
-The commit to `main` triggers **Sync to Hugging Face**. It can also be started
-from **Actions → Sync to Hugging Face → Run workflow → main** after installation.
-The job deliberately skips manual runs from other branches.
+## If the GitHub integration cannot update workflow files
 
-## Credentials and target
+The connected integration may lack the GitHub App `workflows` permission. In
+that case the same validated workflow is staged at `.github/hf-sync.workflow.yml`.
+The repository owner can copy its contents into
+`.github/workflows/sync-to-hugging-face.yml` through the GitHub web editor and
+commit to `main`, or apply the change from their own local Git checkout.
 
-- The owner has confirmed that the GitHub Actions repository secret `HF_TOKEN`
-  exists. Never put its value in a source file, command-line URL, or chat.
-- The token needs write access to the private Space
-  `cxxa4673/hermes-agent`.
-- The workflow uses GitHub-hosted `ubuntu-latest` and its own concurrency group;
-  it does not wait for the inherited Blacksmith CI jobs.
-- The push is non-force. If the Space has unrelated Git history, the job fails
-  instead of silently overwriting it. Reconcile the histories deliberately before
-  retrying; do not solve this by putting a token in a remote URL.
+## Sync success is not app health
 
-## Verify the result
+A green sync confirms the upload and reports the Space status at that moment.
+Check the private Space's build and container logs before calling the deployment
+healthy. The current root README has no Hugging Face SDK metadata, and the root
+Dockerfile has an empty default CMD. A Docker Space needs valid SDK metadata, a
+startup command, the correct listening port (normally 7860), and any required
+runtime secrets. A Gradio Space needs a Gradio entrypoint; mirroring this whole
+repository alone does not provide one.
 
-A green Actions job confirms the Git push, not that the application is healthy.
-Check the private Space's build and container logs separately. The repository's
-current root README has no Hugging Face SDK metadata, and its Dockerfile has an
-empty default CMD. A Docker Space therefore also needs a valid startup command,
-the correct listening port (normally 7860), and any required runtime secrets.
-If the existing Space uses Gradio instead, this whole-repository mirror is not a
-Gradio app payload; decide which application should be deployed before changing
-the Space's files or SDK.
+The dashboard must not be exposed without its authentication provider. Configure
+the supported dashboard auth secrets in the Space rather than disabling auth.
