@@ -1,10 +1,15 @@
 name: Sync to Hugging Face
 
-# This mirror is independent of the upstream CI concurrency group and runners.
+# Independent of the inherited CI concurrency group and Blacksmith runners.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      check_only:
+        description: Only report the private Space status; do not upload files
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,15 +20,19 @@ concurrency:
 
 jobs:
   sync-to-hub:
-    # A manual dispatch from a feature branch must not overwrite the Space's main.
-    if: github.ref == 'refs/heads/main'
+    # Read-only status checks may run from a feature branch. Uploads are main-only.
+    if: github.ref == 'refs/heads/main' || inputs.check_only
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      HF_SPACE_ID: cxxa4673/hermes-agent
+      HF_USERNAME: cxxa4673
     steps:
-      - name: Check out the full Git history
+      - name: Check out the source snapshot
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          path: source
+          fetch-depth: 1
           lfs: true
           persist-credentials: false
 
@@ -32,19 +41,89 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           if [[ -z "${HF_TOKEN:-}" ]]; then
-            echo "::error::Add HF_TOKEN in GitHub repository Settings > Secrets and variables > Actions. Use a Hugging Face token with write access to the Space."
+            echo "::error::Add HF_TOKEN in GitHub repository Settings > Secrets and variables > Actions. Use a token with write access to the Space."
             exit 1
           fi
 
-      - name: Push main to the Hugging Face Space
+      - name: Mirror source files onto the Space's current main branch
+        if: ${{ !inputs.check_only }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          # Send credentials through Git's environment-scoped config, not the
-          # remote URL or a credential file. Git errors cannot expose the token.
-          auth="$(printf '%s:%s' 'cxxa4673' "$HF_TOKEN" | base64 --wrap=0)"
+          # Keep credentials out of URLs, command arguments and saved config.
+          auth="$(printf '%s:%s' "$HF_USERNAME" "$HF_TOKEN" | base64 --wrap=0)"
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0='http.https://huggingface.co/.extraheader'
           export GIT_CONFIG_VALUE_0="Authorization: Basic ${auth}"
-          git push https://huggingface.co/spaces/cxxa4673/hermes-agent HEAD:refs/heads/main
+
+          # Base the upload on the Space's own history. A shallow GitHub checkout
+          # is enough because we mirror files, not GitHub's unrelated history.
+          GIT_LFS_SKIP_SMUDGE=1 git clone --depth=1 --branch main --single-branch \
+            "https://huggingface.co/spaces/${HF_SPACE_ID}" space
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          source = Path("source")
+          space = Path("space")
+          for entry in space.iterdir():
+              if entry.name == ".git":
+                  continue
+              if entry.is_dir() and not entry.is_symlink():
+                  shutil.rmtree(entry)
+              else:
+                  entry.unlink()
+          for entry in source.iterdir():
+              if entry.name == ".git":
+                  continue
+              destination = space / entry.name
+              if entry.is_dir() and not entry.is_symlink():
+                  shutil.copytree(entry, destination, symlinks=True)
+              else:
+                  shutil.copy2(entry, destination, follow_symlinks=False)
+          PY
+
+          git -C space lfs install --local
+          git -C space add -A
+          if git -C space diff --cached --quiet; then
+            echo "The Space already matches this GitHub snapshot."
+            exit 0
+          fi
+          git -C space \
+            -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Mirror ${GITHUB_REPOSITORY}@${GITHUB_SHA}"
+          # No force: a concurrent Space update makes this push fail instead of
+          # replacing work committed after our clone.
+          git -C space push origin HEAD:refs/heads/main
+
+      - name: Report the private Space status
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          request = urllib.request.Request(
+              f"https://huggingface.co/api/spaces/{os.environ['HF_SPACE_ID']}",
+              headers={"Authorization": f"Bearer {os.environ['HF_TOKEN']}"},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              data = json.load(response)
+          runtime = data.get("runtime") or {}
+          status = {
+              "space": os.environ["HF_SPACE_ID"],
+              "sdk": data.get("sdk"),
+              "stage": runtime.get("stage"),
+              "hardware": runtime.get("hardware"),
+          }
+          print(json.dumps(status, indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Hugging Face Space\n\n```json\n")
+              summary.write(json.dumps(status, indent=2))
+              summary.write("\n```\n\nA successful sync does not mean the app has finished building.\n")
+          PY
